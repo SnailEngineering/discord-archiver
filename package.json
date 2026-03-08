@@ -1,0 +1,23 @@
+{
+  "name": "discord-archiver",
+  "version": "1.0.0",
+  "description": "Discord chat history archiver with MongoDB storage and weekly stats reports",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "generate-reports": "node scripts/generateReports.js"
+  },
+  "keywords": [
+    "discord",
+    "archiver",
+    "mongodb",
+    "bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.15.2",
+    "mongoose": "^8.0.3",
+    "dotenv": "^16.3.1"
+  }
+}

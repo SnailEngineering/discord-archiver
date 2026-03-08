@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  archiver:
+    build: .
+    container_name: discord-archiver
+    restart: "no"
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+      - MONGODB_URI=mongodb://mongodb:27017/discord-archiver
+    volumes:
+      - ./reports:/app/reports
+    networks:
+      - discord-network
+
+networks:
+  discord-network:
+    external: true
