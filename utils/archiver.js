@@ -1,7 +1,7 @@
 const Message = require('../db/models/Message');
 const Reaction = require('../db/models/Reaction');
 const SyncLog = require('../db/models/SyncLog');
-const { extractLinksFromMessage } = require('./linkExtractor');
+const { extractLinksFromBatch } = require('./linkExtractor');
 
 // Convert a Date to a Discord snowflake string.
 // Used to anchor paginated fetches to a specific point in time.
@@ -75,43 +75,31 @@ async function getSyncStartTime(guildId) {
   return lastSync.lastSyncTime;
 }
 
-async function archiveMessage(message, editHistory = []) {
-  try {
-    const existingMessage = await Message.findOne({ messageId: message.id });
-
-    await extractLinksFromMessage(message);
-
-    if (editHistory.length > 0) {
-      const { extractLinksFromEditHistory } = require('./linkExtractor');
-      await extractLinksFromEditHistory(message.id, editHistory);
-    }
-
-    const messageData = {
-      messageId: message.id,
-      guildId: message.guildId,
-      channelId: message.channelId,
-      authorId: message.author.id,
-      authorName: message.author.username,
-      authorDiscriminator: message.author.discriminator,
-      content: message.content,
-      createdAt: message.createdAt,
-      editedAt: message.editedAt,
-      editHistory: editHistory,
-      mentionedUserIds: Array.from(message.mentions.users.keys()),
-      mentionedRoleIds: Array.from(message.mentions.roles.keys()),
-    };
-
-    if (existingMessage) {
-      await Message.updateOne({ messageId: message.id }, { $set: messageData });
-    } else {
-      await Message.create(messageData);
-    }
-
-    return true;
-  } catch (error) {
-    console.error(`Failed to archive message ${message.id}:`, error.message);
-    return false;
-  }
+// Archive a batch of { message, editHistory } pairs in a single bulkWrite.
+async function archiveMessages(batch) {
+  const ops = batch.map(({ message, editHistory }) => ({
+    updateOne: {
+      filter: { messageId: message.id },
+      update: {
+        $set: {
+          messageId: message.id,
+          guildId: message.guildId,
+          channelId: message.channelId,
+          authorId: message.author.id,
+          authorName: message.author.username,
+          authorDiscriminator: message.author.discriminator,
+          content: message.content,
+          createdAt: message.createdAt,
+          editedAt: message.editedAt,
+          editHistory,
+          mentionedUserIds: Array.from(message.mentions.users.keys()),
+          mentionedRoleIds: Array.from(message.mentions.roles.keys()),
+        },
+      },
+      upsert: true,
+    },
+  }));
+  await Message.bulkWrite(ops, { ordered: false });
 }
 
 async function archiveReactions(message) {
@@ -234,26 +222,23 @@ async function syncGuild(guild, afterDate, beforeDate = null) {
           continue;
         }
 
-        for (const message of channelMessages) {
-          if (message.author.bot) continue;
+        const batch = channelMessages
+          .filter(m => !m.author.bot)
+          .map(m => ({
+            message: m,
+            editHistory: m.editedAt ? [{ content: m.content, editedAt: m.editedAt }] : [],
+          }));
 
-          const editHistory = [];
-          if (message.editedAt) {
-            editHistory.push({
-              content: message.content,
-              editedAt: message.editedAt,
-            });
-          }
+        if (batch.length > 0) {
+          await archiveMessages(batch);
+          totalMessagesProcessed += batch.length;
+          totalLinksExtracted += await extractLinksFromBatch(batch);
 
-          const archived = await archiveMessage(message, editHistory);
-          if (archived) {
-            totalMessagesProcessed++;
-            totalLinksExtracted += (message.content.match(/https?:\/\/[^\s<>"\]]+/gi) || []).length;
-          }
-
-          const reactionsArchived = await archiveReactions(message);
-          if (reactionsArchived) {
-            totalReactionsProcessed += message.reactions.cache.size;
+          for (const { message } of batch) {
+            const reactionsArchived = await archiveReactions(message);
+            if (reactionsArchived) {
+              totalReactionsProcessed += message.reactions.cache.size;
+            }
           }
         }
 
@@ -306,7 +291,7 @@ async function printDatabaseTotals() {
 
 module.exports = {
   syncGuild,
-  archiveMessage,
+  archiveMessages,
   archiveReactions,
   fetchMessageHistory,
   getSyncStartTime,

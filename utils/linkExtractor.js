@@ -3,75 +3,50 @@ const Link = require('../db/models/Link');
 // URL regex pattern - matches http(s) URLs
 const URL_REGEX = /https?:\/\/[^\s<>"\]]+/gi;
 
-async function extractLinksFromMessage(message) {
-  const urls = message.content.match(URL_REGEX) || [];
-  const extractedLinks = [];
+// Build bulkWrite ops for all links in a message and its edit history.
+function buildLinkOps(message, editHistory = []) {
+  const ops = [];
 
-  for (const url of urls) {
-    try {
-      const urlObj = new URL(url);
-      const link = await Link.findOneAndUpdate(
-        {
-          url: url,
-          messageId: message.id,
-        },
-        {
-          $set: {
-            url: url,
-            messageId: message.id,
-            guildId: message.guildId,
-            channelId: message.channelId,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            domain: urlObj.hostname,
-            foundAt: message.createdAt,
-          },
-        },
-        { upsert: true, new: true }
-      );
-      extractedLinks.push(link);
-    } catch (error) {
-      console.error(`Failed to process URL: ${url}`, error.message);
-    }
-  }
-
-  return extractedLinks;
-}
-
-async function extractLinksFromEditHistory(messageId, editHistory) {
-  let totalLinks = 0;
-
-  for (const edit of editHistory) {
-    const urls = edit.content.match(URL_REGEX) || [];
+  const addOps = (content) => {
+    const urls = content.match(URL_REGEX) || [];
     for (const url of urls) {
       try {
         const urlObj = new URL(url);
-        await Link.updateOne(
-          {
-            url: url,
-            messageId: messageId,
-          },
-          {
-            $set: {
-              url: url,
-              messageId: messageId,
-              domain: urlObj.hostname,
+        ops.push({
+          updateOne: {
+            filter: { url, messageId: message.id },
+            update: {
+              $set: {
+                url,
+                messageId: message.id,
+                guildId: message.guildId,
+                channelId: message.channelId,
+                authorId: message.author.id,
+                authorName: message.author.username,
+                domain: urlObj.hostname,
+                foundAt: message.createdAt,
+              },
             },
+            upsert: true,
           },
-          { upsert: true }
-        );
-        totalLinks++;
-      } catch (error) {
-        console.error(`Failed to process URL from edit history: ${url}`, error.message);
+        });
+      } catch {
+        // invalid URL, skip
       }
     }
-  }
+  };
 
-  return totalLinks;
+  addOps(message.content);
+  for (const edit of editHistory) addOps(edit.content);
+
+  return ops;
 }
 
-module.exports = {
-  extractLinksFromMessage,
-  extractLinksFromEditHistory,
-  URL_REGEX,
-};
+// Execute one bulkWrite for all links across a batch of { message, editHistory } pairs.
+async function extractLinksFromBatch(batch) {
+  const ops = batch.flatMap(({ message, editHistory }) => buildLinkOps(message, editHistory));
+  if (ops.length > 0) await Link.bulkWrite(ops, { ordered: false });
+  return ops.length;
+}
+
+module.exports = { URL_REGEX, buildLinkOps, extractLinksFromBatch };
