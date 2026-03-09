@@ -225,14 +225,14 @@ async function syncGuild(guild, afterDate, beforeDate = null) {
           continue;
         }
 
+        const channelStart = Date.now();
         const channelMessages = await fetchMessageHistory(channel, afterDate, beforeDate);
 
         if (channelMessages.length === 0) {
-          console.log(`✓ #${channel.name} — no messages in window`);
+          const elapsed = ((Date.now() - channelStart) / 1000).toFixed(1);
+          console.log(`✓ #${channel.name} — no messages in window (${elapsed}s)`);
           continue;
         }
-
-        console.log(`✓ #${channel.name} — processing ${channelMessages.length} messages`);
 
         for (const message of channelMessages) {
           if (message.author.bot) continue;
@@ -256,6 +256,9 @@ async function syncGuild(guild, afterDate, beforeDate = null) {
             totalReactionsProcessed += message.reactions.cache.size;
           }
         }
+
+        const elapsed = ((Date.now() - channelStart) / 1000).toFixed(1);
+        console.log(`✓ #${channel.name} — processed ${channelMessages.length} messages (${elapsed}s)`);
       } catch (error) {
         console.error(`Error processing channel #${channel.name}:`, error.message);
       }
