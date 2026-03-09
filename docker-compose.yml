@@ -1,20 +1,30 @@
-version: '3.8'
-
 services:
-  archiver:
-    build: .
+  discord-archiver:
+    image: registry.garage.kwandrews.com/discord-archiver:latest
     container_name: discord-archiver
     restart: "no"
     environment:
+      # Discord credentials
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
       - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
-      - MONGODB_URI=mongodb://mongodb:27017/discord-archiver
-    volumes:
-      - ./reports:/app/reports
+
+      # MongoDB — connects to discord-jarvis's instance over the shared network
+      - MONGODB_URI=mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongodb:27017/discord-jarvis?authSource=admin
+
+      # Backfill mode: yesterday | last_week | last_month | last_year | all | custom
+      # Leave unset to fall back to incremental sync (SyncLog-based).
+      - BACKFILL_MODE=${BACKFILL_MODE:-}
+
+      # Only used when BACKFILL_MODE=custom (ISO 8601 dates)
+      - BACKFILL_START_DATE=${BACKFILL_START_DATE:-}
+      - BACKFILL_END_DATE=${BACKFILL_END_DATE:-}
+
     networks:
       - discord-network
 
+# Joins discord-jarvis's network — that stack must be running first.
 networks:
   discord-network:
     external: true
+    name: discord-network

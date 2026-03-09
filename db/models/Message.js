@@ -19,6 +19,8 @@ const messageSchema = new mongoose.Schema({
   reactionCount: { type: Number, default: 0 },
   mentionedUserIds: [String],
   mentionedRoleIds: [String],
+  deleted: { type: Boolean, default: false, index: true },
+  deletedAt: Date,
 }, {
   timestamps: true,
 });

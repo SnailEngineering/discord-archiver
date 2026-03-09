@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits } = require('discord.js');
 const { connectDB, disconnectDB } = require('./db/connection');
-const { syncGuild } = require('./utils/archiver');
+const { syncGuild, getSyncStartTime, getBackfillDateRange } = require('./utils/archiver');
 require('dotenv').config();
 
 const client = new Client({
@@ -19,10 +19,8 @@ client.once('ready', async () => {
   console.log(`✓ Bot logged in as ${client.user.tag}`);
 
   try {
-    // Connect to MongoDB
     dbConnection = await connectDB();
 
-    // Get the guild to archive
     const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
     if (!guild) {
       console.error('✗ Guild not found. Please check DISCORD_GUILD_ID in .env');
@@ -30,16 +28,32 @@ client.once('ready', async () => {
     }
 
     console.log(`✓ Found guild: ${guild.name}`);
+
+    // Resolve the date window for this run
+    const backfill = getBackfillDateRange();
+    let afterDate, beforeDate;
+
+    if (backfill) {
+      afterDate = backfill.afterDate;
+      beforeDate = backfill.beforeDate;
+      const mode = process.env.BACKFILL_MODE;
+      console.log(`\n🗂  Backfill mode: ${mode}`);
+      console.log(`   From: ${afterDate.toLocaleString()}`);
+      console.log(`   To:   ${beforeDate.toLocaleString()}`);
+    } else {
+      afterDate = await getSyncStartTime(guild.id);
+      beforeDate = null;
+      console.log(`\n🔄 Incremental sync from: ${afterDate.toLocaleString()}`);
+    }
+
     console.log('\n📦 Starting archive sync...\n');
 
-    // Perform the archive sync
     const startTime = Date.now();
-    await syncGuild(guild);
+    await syncGuild(guild, afterDate, beforeDate);
     const duration = Date.now() - startTime;
 
     console.log(`\n✓ Archive sync completed in ${(duration / 1000).toFixed(2)}s`);
 
-    // Disconnect and exit
     await disconnectDB();
     await client.destroy();
     process.exit(0);

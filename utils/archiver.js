@@ -3,11 +3,70 @@ const Reaction = require('../db/models/Reaction');
 const SyncLog = require('../db/models/SyncLog');
 const { extractLinksFromMessage } = require('./linkExtractor');
 
+// Convert a Date to a Discord snowflake string.
+// Used to anchor paginated fetches to a specific point in time.
+function dateToSnowflake(date) {
+  const DISCORD_EPOCH = 1420070400000n;
+  return String((BigInt(date.getTime()) - DISCORD_EPOCH) << 22n);
+}
+
+/**
+ * Resolve the [afterDate, beforeDate] window to archive.
+ *
+ * BACKFILL_MODE values:
+ *   yesterday   — past 24 hours
+ *   last_week   — past 7 days
+ *   last_month  — past 30 days
+ *   last_year   — past 365 days
+ *   all         — everything since Discord launched (2015-01-01)
+ *   custom      — BACKFILL_START_DATE … BACKFILL_END_DATE (or now)
+ *   (unset)     — incremental: use SyncLog, fall back to 7 days ago
+ *
+ * Returns { afterDate, beforeDate } or null for incremental mode.
+ */
+function getBackfillDateRange() {
+  const mode = (process.env.BACKFILL_MODE || '').trim();
+  if (!mode) return null;
+
+  const now = new Date();
+  const DAY = 24 * 60 * 60 * 1000;
+
+  const ranges = {
+    yesterday:  new Date(now - DAY),
+    last_week:  new Date(now - 7   * DAY),
+    last_month: new Date(now - 30  * DAY),
+    last_year:  new Date(now - 365 * DAY),
+    all:        new Date('2015-01-01T00:00:00.000Z'),
+  };
+
+  if (mode === 'custom') {
+    if (!process.env.BACKFILL_START_DATE) {
+      console.error('✗ BACKFILL_MODE=custom requires BACKFILL_START_DATE');
+      process.exit(1);
+    }
+    const afterDate = new Date(process.env.BACKFILL_START_DATE);
+    const beforeDate = process.env.BACKFILL_END_DATE
+      ? new Date(process.env.BACKFILL_END_DATE)
+      : now;
+    if (isNaN(afterDate) || isNaN(beforeDate)) {
+      console.error('✗ Invalid BACKFILL_START_DATE or BACKFILL_END_DATE (use ISO 8601)');
+      process.exit(1);
+    }
+    return { afterDate, beforeDate };
+  }
+
+  if (!ranges[mode]) {
+    console.error(`✗ Unknown BACKFILL_MODE "${mode}". Valid: yesterday, last_week, last_month, last_year, all, custom`);
+    process.exit(1);
+  }
+
+  return { afterDate: ranges[mode], beforeDate: now };
+}
+
 async function getSyncStartTime(guildId) {
   const lastSync = await SyncLog.findOne({ guildId });
 
   if (!lastSync) {
-    // First sync: start from 7 days ago
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     return sevenDaysAgo;
@@ -20,10 +79,8 @@ async function archiveMessage(message, editHistory = []) {
   try {
     const existingMessage = await Message.findOne({ messageId: message.id });
 
-    // Extract links from message content
     await extractLinksFromMessage(message);
 
-    // Extract links from edit history
     if (editHistory.length > 0) {
       const { extractLinksFromEditHistory } = require('./linkExtractor');
       await extractLinksFromEditHistory(message.id, editHistory);
@@ -45,13 +102,8 @@ async function archiveMessage(message, editHistory = []) {
     };
 
     if (existingMessage) {
-      // Update existing message
-      await Message.updateOne(
-        { messageId: message.id },
-        { $set: messageData }
-      );
+      await Message.updateOne({ messageId: message.id }, { $set: messageData });
     } else {
-      // Create new message
       await Message.create(messageData);
     }
 
@@ -73,10 +125,7 @@ async function archiveReactions(message) {
       }));
 
       await Reaction.findOneAndUpdate(
-        {
-          messageId: message.id,
-          emoji: emoji,
-        },
+        { messageId: message.id, emoji: emoji },
         {
           $set: {
             messageId: message.id,
@@ -98,22 +147,30 @@ async function archiveReactions(message) {
   }
 }
 
-async function fetchMessageHistory(channel, afterDate) {
+/**
+ * Fetch all messages in a channel between afterDate and beforeDate.
+ * Paginates backwards through Discord's API.
+ *
+ * @param {TextChannel} channel
+ * @param {Date}        afterDate  - stop fetching messages older than this
+ * @param {Date}        beforeDate - start fetching from this point backwards (default: now)
+ */
+async function fetchMessageHistory(channel, afterDate, beforeDate = null) {
   const messages = [];
-  let lastMessageId = null;
+  // If beforeDate is provided and isn't "now", anchor the first page there.
+  let lastMessageId = beforeDate ? dateToSnowflake(beforeDate) : null;
   let hasMore = true;
 
-  console.log(`  Fetching messages from #${channel.name} after ${afterDate.toLocaleString()}`);
+  console.log(
+    `  Fetching #${channel.name}` +
+    ` after ${afterDate.toLocaleString()}` +
+    (beforeDate ? ` before ${beforeDate.toLocaleString()}` : '')
+  );
 
   while (hasMore) {
     try {
-      const options = {
-        limit: 100,
-      };
-
-      if (lastMessageId) {
-        options.before = lastMessageId;
-      }
+      const options = { limit: 100 };
+      if (lastMessageId) options.before = lastMessageId;
 
       const fetchedMessages = await channel.messages.fetch(options);
 
@@ -142,20 +199,16 @@ async function fetchMessageHistory(channel, afterDate) {
   return messages.reverse();
 }
 
-async function syncGuild(guild) {
+async function syncGuild(guild, afterDate, beforeDate = null) {
   const startSyncTime = new Date();
   let totalMessagesProcessed = 0;
   let totalReactionsProcessed = 0;
   let totalLinksExtracted = 0;
 
   try {
-    // Get the start time for this sync
-    const syncStartTime = await getSyncStartTime(guild.id);
+    console.log(`Syncing guild: ${guild.name}`);
+    console.log(`Window: ${afterDate.toLocaleString()} → ${(beforeDate || new Date()).toLocaleString()}\n`);
 
-    console.log(`Last sync: ${syncStartTime.toLocaleString()}`);
-    console.log(`Syncing guild: ${guild.name}\n`);
-
-    // Fetch all text channels
     const channels = guild.channels.cache.filter(ch => ch.isTextBased() && !ch.isDMBased());
 
     if (channels.size === 0) {
@@ -165,7 +218,6 @@ async function syncGuild(guild) {
 
     console.log(`Found ${channels.size} text channels\n`);
 
-    // Process each channel
     for (const [, channel] of channels) {
       try {
         if (!channel.permissionsFor(guild.members.me).has('ViewChannel')) {
@@ -173,23 +225,20 @@ async function syncGuild(guild) {
           continue;
         }
 
-        const channelMessages = await fetchMessageHistory(channel, syncStartTime);
+        const channelMessages = await fetchMessageHistory(channel, afterDate, beforeDate);
 
         if (channelMessages.length === 0) {
-          console.log(`✓ #${channel.name} - no new messages`);
+          console.log(`✓ #${channel.name} — no messages in window`);
           continue;
         }
 
-        console.log(`✓ #${channel.name} - processing ${channelMessages.length} messages`);
+        console.log(`✓ #${channel.name} — processing ${channelMessages.length} messages`);
 
         for (const message of channelMessages) {
           if (message.author.bot) continue;
 
-          // Track edit history
           const editHistory = [];
           if (message.editedAt) {
-            // Note: Discord doesn't provide full edit history via API
-            // We can only track that a message was edited and the current content
             editHistory.push({
               content: message.content,
               editedAt: message.editedAt,
@@ -212,26 +261,28 @@ async function syncGuild(guild) {
       }
     }
 
-    // Update sync log
-    await SyncLog.findOneAndUpdate(
-      { guildId: guild.id },
-      {
-        $set: {
-          guildId: guild.id,
-          lastSyncTime: startSyncTime,
-          syncDuration: Date.now() - startSyncTime.getTime(),
-          messagesProcessed: totalMessagesProcessed,
-          reactionsProcessed: totalReactionsProcessed,
-          linksExtracted: totalLinksExtracted,
+    // Only update SyncLog for incremental runs (not explicit backfill batches)
+    if (!process.env.BACKFILL_MODE) {
+      await SyncLog.findOneAndUpdate(
+        { guildId: guild.id },
+        {
+          $set: {
+            guildId: guild.id,
+            lastSyncTime: startSyncTime,
+            syncDuration: Date.now() - startSyncTime.getTime(),
+            messagesProcessed: totalMessagesProcessed,
+            reactionsProcessed: totalReactionsProcessed,
+            linksExtracted: totalLinksExtracted,
+          },
         },
-      },
-      { upsert: true, new: true }
-    );
+        { upsert: true, new: true }
+      );
+    }
 
     console.log(`\n📊 Sync Summary:`);
-    console.log(`  Messages: ${totalMessagesProcessed}`);
+    console.log(`  Messages:  ${totalMessagesProcessed}`);
     console.log(`  Reactions: ${totalReactionsProcessed}`);
-    console.log(`  Links: ${totalLinksExtracted}`);
+    console.log(`  Links:     ${totalLinksExtracted}`);
   } catch (error) {
     console.error('Error during guild sync:', error);
     throw error;
@@ -244,4 +295,5 @@ module.exports = {
   archiveReactions,
   fetchMessageHistory,
   getSyncStartTime,
+  getBackfillDateRange,
 };
