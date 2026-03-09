@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits } = require('discord.js');
 const { connectDB, disconnectDB } = require('./db/connection');
-const { syncGuild, getSyncStartTime, getBackfillDateRange } = require('./utils/archiver');
+const { syncGuild, getSyncStartTime, getBackfillDateRange, printDatabaseTotals } = require('./utils/archiver');
 require('dotenv').config();
 
 const client = new Client({
@@ -54,6 +54,7 @@ client.once('ready', async () => {
 
     console.log(`\n✓ Archive sync completed in ${(duration / 1000).toFixed(2)}s`);
 
+    await printDatabaseTotals();
     await disconnectDB();
     await client.destroy();
     process.exit(0);

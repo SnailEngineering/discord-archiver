@@ -289,6 +289,18 @@ async function syncGuild(guild, afterDate, beforeDate = null) {
   }
 }
 
+async function printDatabaseTotals() {
+  const [messages, reactions, links] = await Promise.all([
+    Message.countDocuments(),
+    Reaction.countDocuments(),
+    require('../db/models/Link').countDocuments(),
+  ]);
+  console.log('\n📈 Database totals:');
+  console.log(`  Messages:  ${messages.toLocaleString()}`);
+  console.log(`  Reactions: ${reactions.toLocaleString()}`);
+  console.log(`  Links:     ${links.toLocaleString()}`);
+}
+
 module.exports = {
   syncGuild,
   archiveMessage,
@@ -296,4 +308,5 @@ module.exports = {
   fetchMessageHistory,
   getSyncStartTime,
   getBackfillDateRange,
+  printDatabaseTotals,
 };
