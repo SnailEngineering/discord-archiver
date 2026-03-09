@@ -1,0 +1,31 @@
+# Pipeline: Main
+#
+# Triggers on every push to main. Builds the archiver image and pushes it to
+# the private registry tagged :latest. No auto-deploy — this is a batch job
+# run on demand via Portainer.
+#
+# Required Woodpecker secrets:
+#   registry_username   — username for registry.garage.kwandrews.com
+#   registry_password   — password for registry.garage.kwandrews.com
+#
+# Required Woodpecker server config:
+#   WOODPECKER_PLUGINS_PRIVILEGED=woodpeckerci/plugin-docker-buildx
+
+steps:
+  - name: build-and-push
+    image: woodpeckerci/plugin-docker-buildx
+    when:
+      - event: push
+        branch: main
+    settings:
+      registry: registry.garage.kwandrews.com
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+      repo: registry.garage.kwandrews.com/discord-archiver
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+      tags:
+        - latest
