@@ -109,37 +109,32 @@ async function archiveMessages(batch) {
   return newBatch;
 }
 
-async function archiveReactions(message) {
-  try {
-    for (const [emoji, reactionObj] of message.reactions.cache) {
-      const users = await reactionObj.users.fetch();
-      const userArray = Array.from(users.values()).map(user => ({
-        userId: user.id,
-        userName: user.username,
-        addedAt: new Date(),
-      }));
+// Fetch all reaction docs for a single message, parallelizing users.fetch() across emoji types.
+// Returns an array of reaction documents ready for insertMany.
+async function fetchReactionDocs(message) {
+  const entries = [...message.reactions.cache.entries()];
+  if (entries.length === 0) return [];
 
-      await Reaction.findOneAndUpdate(
-        { messageId: message.id, emoji: emoji },
-        {
-          $set: {
-            messageId: message.id,
-            guildId: message.guildId,
-            emoji: emoji,
-            emojiName: reactionObj.emoji.name,
-            emojiId: reactionObj.emoji.id,
-            count: reactionObj.count,
-            users: userArray,
-          },
-        },
-        { upsert: true, new: true }
-      );
-    }
-    return true;
-  } catch (error) {
-    console.error(`Failed to archive reactions for message ${message.id}:`, error.message);
-    return false;
-  }
+  const docs = await Promise.all(
+    entries.map(async ([emoji, reactionObj]) => {
+      const users = await reactionObj.users.fetch();
+      return {
+        messageId: message.id,
+        guildId: message.guildId,
+        emoji,
+        emojiName: reactionObj.emoji.name,
+        emojiId: reactionObj.emoji.id,
+        count: reactionObj.count,
+        users: Array.from(users.values()).map(user => ({
+          userId: user.id,
+          userName: user.username,
+          addedAt: new Date(),
+        })),
+      };
+    })
+  );
+
+  return docs;
 }
 
 /**
@@ -241,11 +236,21 @@ async function syncGuild(guild, afterDate, beforeDate = null) {
           totalMessagesProcessed += newBatch.length;
           totalLinksExtracted += await extractLinksFromBatch(newBatch);
 
+          // Fetch reaction users sequentially across messages (rate-limit safe),
+          // parallelizing across emoji types within each message.
+          const reactionDocs = [];
           for (const { message } of newBatch) {
-            const reactionsArchived = await archiveReactions(message);
-            if (reactionsArchived) {
-              totalReactionsProcessed += message.reactions.cache.size;
+            try {
+              const docs = await fetchReactionDocs(message);
+              reactionDocs.push(...docs);
+            } catch (error) {
+              console.error(`Failed to fetch reactions for message ${message.id}:`, error.message);
             }
+          }
+
+          if (reactionDocs.length > 0) {
+            await Reaction.insertMany(reactionDocs, { ordered: false });
+            totalReactionsProcessed += reactionDocs.length;
           }
         }
 
@@ -299,7 +304,7 @@ async function printDatabaseTotals() {
 module.exports = {
   syncGuild,
   archiveMessages,
-  archiveReactions,
+  fetchReactionDocs,
   fetchMessageHistory,
   getSyncStartTime,
   getBackfillDateRange,
