@@ -75,31 +75,38 @@ async function getSyncStartTime(guildId) {
   return lastSync.lastSyncTime;
 }
 
-// Archive a batch of { message, editHistory } pairs in a single bulkWrite.
+// Archive a batch of { message, editHistory } pairs.
+// Skips messages that already exist in the DB and inserts only new ones.
+// Returns the subset of the batch that was actually inserted.
 async function archiveMessages(batch) {
-  const ops = batch.map(({ message, editHistory }) => ({
-    updateOne: {
-      filter: { messageId: message.id },
-      update: {
-        $set: {
-          messageId: message.id,
-          guildId: message.guildId,
-          channelId: message.channelId,
-          authorId: message.author.id,
-          authorName: message.author.username,
-          authorDiscriminator: message.author.discriminator,
-          content: message.content,
-          createdAt: message.createdAt,
-          editedAt: message.editedAt,
-          editHistory,
-          mentionedUserIds: Array.from(message.mentions.users.keys()),
-          mentionedRoleIds: Array.from(message.mentions.roles.keys()),
-        },
-      },
-      upsert: true,
-    },
-  }));
-  await Message.bulkWrite(ops, { ordered: false });
+  const ids = batch.map(({ message }) => message.id);
+  const existingIds = new Set(
+    (await Message.find({ messageId: { $in: ids } }, { messageId: 1 }).lean())
+      .map(m => m.messageId)
+  );
+
+  const newBatch = batch.filter(({ message }) => !existingIds.has(message.id));
+  if (newBatch.length === 0) return newBatch;
+
+  await Message.insertMany(
+    newBatch.map(({ message, editHistory }) => ({
+      messageId: message.id,
+      guildId: message.guildId,
+      channelId: message.channelId,
+      authorId: message.author.id,
+      authorName: message.author.username,
+      authorDiscriminator: message.author.discriminator,
+      content: message.content,
+      createdAt: message.createdAt,
+      editedAt: message.editedAt,
+      editHistory,
+      mentionedUserIds: Array.from(message.mentions.users.keys()),
+      mentionedRoleIds: Array.from(message.mentions.roles.keys()),
+    })),
+    { ordered: false }
+  );
+
+  return newBatch;
 }
 
 async function archiveReactions(message) {
@@ -230,11 +237,11 @@ async function syncGuild(guild, afterDate, beforeDate = null) {
           }));
 
         if (batch.length > 0) {
-          await archiveMessages(batch);
-          totalMessagesProcessed += batch.length;
-          totalLinksExtracted += await extractLinksFromBatch(batch);
+          const newBatch = await archiveMessages(batch);
+          totalMessagesProcessed += newBatch.length;
+          totalLinksExtracted += await extractLinksFromBatch(newBatch);
 
-          for (const { message } of batch) {
+          for (const { message } of newBatch) {
             const reactionsArchived = await archiveReactions(message);
             if (reactionsArchived) {
               totalReactionsProcessed += message.reactions.cache.size;

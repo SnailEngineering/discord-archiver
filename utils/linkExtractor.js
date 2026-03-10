@@ -3,32 +3,24 @@ const Link = require('../db/models/Link');
 // URL regex pattern - matches http(s) URLs
 const URL_REGEX = /https?:\/\/[^\s<>"\]]+/gi;
 
-// Build bulkWrite ops for all links in a message and its edit history.
-function buildLinkOps(message, editHistory = []) {
-  const ops = [];
+// Build link documents for a message and its edit history.
+function buildLinkDocs(message, editHistory = []) {
+  const docs = [];
 
-  const addOps = (content) => {
+  const addDocs = (content) => {
     const urls = content.match(URL_REGEX) || [];
     for (const url of urls) {
       try {
         const urlObj = new URL(url);
-        ops.push({
-          updateOne: {
-            filter: { url, messageId: message.id },
-            update: {
-              $set: {
-                url,
-                messageId: message.id,
-                guildId: message.guildId,
-                channelId: message.channelId,
-                authorId: message.author.id,
-                authorName: message.author.username,
-                domain: urlObj.hostname,
-                foundAt: message.createdAt,
-              },
-            },
-            upsert: true,
-          },
+        docs.push({
+          url,
+          messageId: message.id,
+          guildId: message.guildId,
+          channelId: message.channelId,
+          authorId: message.author.id,
+          authorName: message.author.username,
+          domain: urlObj.hostname,
+          foundAt: message.createdAt,
         });
       } catch {
         // invalid URL, skip
@@ -36,17 +28,18 @@ function buildLinkOps(message, editHistory = []) {
     }
   };
 
-  addOps(message.content);
-  for (const edit of editHistory) addOps(edit.content);
+  addDocs(message.content);
+  for (const edit of editHistory) addDocs(edit.content);
 
-  return ops;
+  return docs;
 }
 
-// Execute one bulkWrite for all links across a batch of { message, editHistory } pairs.
+// Insert all links for a batch of new { message, editHistory } pairs.
+// Caller guarantees these are new messages, so no existence check is needed.
 async function extractLinksFromBatch(batch) {
-  const ops = batch.flatMap(({ message, editHistory }) => buildLinkOps(message, editHistory));
-  if (ops.length > 0) await Link.bulkWrite(ops, { ordered: false });
-  return ops.length;
+  const docs = batch.flatMap(({ message, editHistory }) => buildLinkDocs(message, editHistory));
+  if (docs.length > 0) await Link.insertMany(docs, { ordered: false });
+  return docs.length;
 }
 
-module.exports = { URL_REGEX, buildLinkOps, extractLinksFromBatch };
+module.exports = { URL_REGEX, buildLinkDocs, extractLinksFromBatch };
