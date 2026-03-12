@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "generate-reports": "node scripts/generateReports.js"
+    "generate-reports": "node scripts/generateReports.js",
+    "export": "node scripts/exportToJson.js"
   },
   "keywords": [
     "discord",

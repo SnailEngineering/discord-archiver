@@ -22,7 +22,7 @@ const messageSchema = new mongoose.Schema({
   deleted: { type: Boolean, default: false, index: true },
   deletedAt: Date,
 }, {
-  timestamps: true,
+  timestamps: { createdAt: false, updatedAt: true },
 });
 
 messageSchema.index({ guildId: 1, createdAt: -1 });
